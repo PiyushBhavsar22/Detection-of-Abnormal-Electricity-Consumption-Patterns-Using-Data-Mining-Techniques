@@ -9,42 +9,66 @@ from imblearn.over_sampling import SMOTE
 import warnings
 import os
 import glob
-warnings.filterwarnings('ignore')
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Suppress specific warnings only
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
+
+# Configuration
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+CONTAMINATION_RATE = 0.05
+RANDOM_STATE = 42
+TEST_SIZE = 0.2
 
 def run_pipeline():
-    print("==========================================")
-    print("STARTING ADVANCED ML PIPELINE")
-    print("==========================================")
+    logger.info("==========================================")
+    logger.info("STARTING ADVANCED ML PIPELINE")
+    logger.info("==========================================")
+
+    # Create output directory if not exists
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # ==========================================
-    # PHASE 1: LOAD ALL DATASETS 
+    # PHASE 1: LOAD ALL DATASETS
     # ==========================================
-    print("\n--- PHASE 1: LOADING DATA ---")
-    
-    block_folder = r"E:/Project/Test Andrew Project/data/hhblock_dataset"
+    logger.info("--- PHASE 1: LOADING DATA ---")
+
+    block_folder = os.path.join(DATA_DIR, "hhblock_dataset")
     block_files = glob.glob(os.path.join(block_folder, "**", "*.csv"), recursive=True)
-    
-    print(f"DEBUG: Searching inside -> {block_folder}")
-    print(f"DEBUG: Found {len(block_files)} CSV files anywhere inside this directory.")
-    
+
+    logger.info(f"Searching inside -> {block_folder}")
+    logger.info(f"Found {len(block_files)} CSV files")
+
     if not block_files:
         raise FileNotFoundError(f"No CSV files found in '{block_folder}'. Check folder name!")
 
-    print(f"Loading {len(block_files)} block files... (This might take a few minutes!)")
-    df_list = [pd.read_csv(file) for file in block_files]
+    logger.info(f"Loading {len(block_files)} block files...")
+    df_list = []
+    for i, file in enumerate(block_files):
+        df_list.append(pd.read_csv(file))
+        if (i + 1) % 10 == 0:
+            logger.info(f"  Loaded {i + 1}/{len(block_files)} files...")
     df = pd.concat(df_list, ignore_index=True)
-    print(f"Loaded {len(df):,} rows of smart meter data.")
-    
-    df_house = pd.read_csv(r"E:/Project/Test Andrew Project/data/informations_households.csv", encoding='latin-1')
-    df_weather_daily = pd.read_csv(r"E:/Project/Test Andrew Project/data/weather_daily_darksky.csv", encoding='latin-1')
-    df_holidays = pd.read_csv(r"E:/Project/Test Andrew Project/data/uk_bank_holidays.csv", encoding='latin-1')
-    df_weather_hourly = pd.read_csv(r"E:/Project/Test Andrew Project/data/weather_hourly_darksky.csv", encoding='latin-1')
-    df_acorn = pd.read_csv(r"E:/Project/Test Andrew Project/data/acorn_details.csv", encoding='latin-1')
+    del df_list  # Free memory
+    logger.info(f"Loaded {len(df):,} rows of smart meter data.")
+
+    df_house = pd.read_csv(os.path.join(DATA_DIR, "informations_households.csv"), encoding='latin-1')
+    df_weather_daily = pd.read_csv(os.path.join(DATA_DIR, "weather_daily_darksky.csv"), encoding='latin-1')
+    df_holidays = pd.read_csv(os.path.join(DATA_DIR, "uk_bank_holidays.csv"), encoding='latin-1')
+    df_weather_hourly = pd.read_csv(os.path.join(DATA_DIR, "weather_hourly_darksky.csv"), encoding='latin-1')
+    df_acorn = pd.read_csv(os.path.join(DATA_DIR, "acorn_details.csv"), encoding='latin-1')
 
     # ==========================================
     # PHASE 2: ADVANCED PREPROCESSING & MERGING
     # ==========================================
-    print("\n--- PHASE 2: PREPROCESSING & MERGING ---")
+    logger.info("--- PHASE 2: PREPROCESSING & MERGING ---")
     
     df.columns = df.columns.str.strip()
     df_house.columns = df_house.columns.str.strip()
@@ -82,28 +106,63 @@ def run_pipeline():
         date_col = 'tpep_pickup_datetime'
     elif 'day' in df.columns:
         date_col = 'day'
+    elif 'tstp' in df.columns:
+        date_col = 'tstp'
     else:
-        date_col = df.columns[1] 
+        raise ValueError(f"No valid date column found. Available columns: {df.columns.tolist()}")
 
     df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
     df = df.dropna(subset=[date_col])
     df['day_formatted'] = df[date_col].dt.normalize()
-    df['energy_kwh'] = pd.to_numeric(df['energy_kwh'] if 'energy_kwh' in df.columns else df.iloc[:, 2], errors='coerce').fillna(0)
+
+    # Handle different data formats
+    if 'energy_kwh' in df.columns:
+        df['energy_kwh'] = pd.to_numeric(df['energy_kwh'], errors='coerce').fillna(0)
+    elif 'energy(kWh/hh)' in df.columns:
+        df['energy_kwh'] = pd.to_numeric(df['energy(kWh/hh)'], errors='coerce').fillna(0)
+    else:
+        # Check for half-hourly columns (hh_0 to hh_47)
+        hh_cols = [col for col in df.columns if col.startswith('hh_')]
+        if hh_cols:
+            logger.info(f"Found {len(hh_cols)} half-hourly columns. Reshaping data...")
+            # Melt wide format to long format
+            id_cols = ['LCLid', date_col, 'day_formatted']
+            df = df.melt(id_vars=id_cols, value_vars=hh_cols, var_name='hh_slot', value_name='energy_kwh')
+            df['energy_kwh'] = pd.to_numeric(df['energy_kwh'], errors='coerce').fillna(0)
+            # Extract hour from hh_slot (hh_0 to hh_47 -> 0 to 23, each hour has 2 slots)
+            df['hh_num'] = df['hh_slot'].str.replace('hh_', '').astype(int)
+            df['hour'] = df['hh_num'] // 2  # Convert half-hour slot to hour
+            logger.info(f"Reshaped data to {len(df):,} rows")
+        else:
+            raise ValueError(f"No energy column found. Available columns: {df.columns.tolist()}")
 
     # ==========================================
     # PHASE 3: FEATURE ENGINEERING
     # ==========================================
-    print("\n--- PHASE 3: FEATURE ENGINEERING ---")
-    df['hour'] = df[date_col].dt.hour
+    logger.info("--- PHASE 3: FEATURE ENGINEERING ---")
+
+    # Calculate hour if not already computed from half-hourly data
+    if 'hour' not in df.columns:
+        df['hour'] = df[date_col].dt.hour
+
     df['is_peak'] = df['hour'].apply(lambda x: 1 if 17 <= x <= 21 else 0)
 
-    daily_features = df.groupby(['LCLid', 'day_formatted']).agg(
+    # Calculate daily aggregates safely (avoiding lambda with outer scope reference)
+    daily_basic = df.groupby(['LCLid', 'day_formatted']).agg(
         total_daily_kwh=('energy_kwh', 'sum'),
-        daily_variance=('energy_kwh', 'var'),
-        peak_sum=('energy_kwh', lambda x: x[df.loc[x.index, 'is_peak'] == 1].sum()),
-        off_peak_sum=('energy_kwh', lambda x: x[df.loc[x.index, 'is_peak'] == 0].sum())
+        daily_variance=('energy_kwh', 'var')
     ).reset_index()
-    
+
+    # Calculate peak and off-peak sums separately
+    peak_data = df[df['is_peak'] == 1].groupby(['LCLid', 'day_formatted'])['energy_kwh'].sum().reset_index(name='peak_sum')
+    off_peak_data = df[df['is_peak'] == 0].groupby(['LCLid', 'day_formatted'])['energy_kwh'].sum().reset_index(name='off_peak_sum')
+
+    # Merge all daily features
+    daily_features = daily_basic.merge(peak_data, on=['LCLid', 'day_formatted'], how='left')
+    daily_features = daily_features.merge(off_peak_data, on=['LCLid', 'day_formatted'], how='left')
+    daily_features['peak_sum'] = daily_features['peak_sum'].fillna(0)
+    daily_features['off_peak_sum'] = daily_features['off_peak_sum'].fillna(0)
+
     daily_features.rename(columns={'day_formatted': 'day'}, inplace=True)
 
     daily_features['daily_variance'] = daily_features['daily_variance'].fillna(0)
@@ -118,13 +177,13 @@ def run_pipeline():
     # ==========================================
     # PHASE 4: UNSUPERVISED ANOMALY DETECTION
     # ==========================================
-    print("\n--- PHASE 4: UNSUPERVISED LEARNING (Isolation Forest) ---")
-    ml_features = ['total_daily_kwh', 'daily_variance', 'peak_sum', 'off_peak_sum', 
+    logger.info("--- PHASE 4: UNSUPERVISED LEARNING (Isolation Forest) ---")
+    ml_features = ['total_daily_kwh', 'daily_variance', 'peak_sum', 'off_peak_sum',
                    'peak_to_offpeak_ratio', 'temperatureMax', 'temp_hr_std', 'is_holiday']
-    
+
     X_unsupervised = daily_features[ml_features]
-    
-    iso_forest = IsolationForest(contamination=0.05, random_state=42)
+
+    iso_forest = IsolationForest(contamination=CONTAMINATION_RATE, random_state=RANDOM_STATE)
     daily_features['anomaly_score'] = iso_forest.fit_predict(X_unsupervised)
     daily_features['is_anomaly'] = daily_features['anomaly_score'].apply(lambda x: 1 if x == -1 else 0)
 
@@ -132,7 +191,7 @@ def run_pipeline():
     # PHASE 5: SUPERVISED TRAINING SETUP (THE FIX)
     # ==========================================
 
-    print("\n--- PHASE 5: SUPERVISED TRAINING SETUP ---")
+    logger.info("--- PHASE 5: SUPERVISED TRAINING SETUP ---")
     
     # Group data by user
     agg_dict = {col: 'mean' for col in ml_features}
@@ -157,54 +216,53 @@ def run_pipeline():
     # ==========================================
     # PHASE 6: SMOTE, EVALUATION & EXPORT
     # ==========================================
-    print("\n--- PHASE 6: RIGOROUS EVALUATION & SMOTE ---")
+    logger.info("--- PHASE 6: RIGOROUS EVALUATION & SMOTE ---")
 
     # 1. Train/Test Split (80% Train, 20% Test)
     X_train, X_test, y_train, y_test = train_test_split(
-        X_supervised, y_supervised, test_size=0.2, random_state=42, stratify=y_supervised
+        X_supervised, y_supervised, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_supervised
     )
 
     # 2. Export the untouched 20% test data for the Jupyter Notebook visualizations
-    X_test.to_csv("X_test_sample.csv", index=False)
-    y_test.to_csv("y_test_sample.csv", index=False)
-    print("Exported unseen test data to CSV for Jupyter Notebook visualizations.")
+    X_test.to_csv(os.path.join(OUTPUT_DIR, "X_test_sample.csv"), index=False)
+    y_test.to_csv(os.path.join(OUTPUT_DIR, "y_test_sample.csv"), index=False)
+    logger.info("Exported unseen test data to CSV for Jupyter Notebook visualizations.")
 
     # 3. Apply SMOTE strictly to the Training Data to fix Class Imbalance
-    print(f"\nOriginal Training Class Balance: \n{y_train.value_counts()}")
-    smote = SMOTE(random_state=42)
+    logger.info(f"Original Training Class Balance: \n{y_train.value_counts().to_dict()}")
+    smote = SMOTE(random_state=RANDOM_STATE)
     X_train_smote, y_train_smote = smote.fit_resample(X_train, y_train)
-    print(f"New SMOTE Training Class Balance: \n{y_train_smote.value_counts()}\n")
+    logger.info(f"New SMOTE Training Class Balance: \n{y_train_smote.value_counts().to_dict()}")
 
     # 4. Define the models for the head-to-head showdown
     models = {
-        "Logistic Regression (Baseline)": LogisticRegression(max_iter=1000, random_state=42),
-        "Gradient Boosting (Complex)": GradientBoostingClassifier(n_estimators=100, random_state=42),
-        "Random Forest (Proposed Model)": RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1)
+        "Logistic Regression (Baseline)": LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
+        "Gradient Boosting (Complex)": GradientBoostingClassifier(n_estimators=100, random_state=RANDOM_STATE),
+        "Random Forest (Proposed Model)": RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE, n_jobs=-1)
     }
 
     # 5. Train on SMOTE data and Evaluate on UNTOUCHED Test data
     for name, model in models.items():
-        print(f"[ Evaluating: {name} ]")
-        model.fit(X_train_smote, y_train_smote) 
+        logger.info(f"[ Evaluating: {name} ]")
+        model.fit(X_train_smote, y_train_smote)
         y_pred = model.predict(X_test)
-        
-        print(f"Overall Accuracy: {accuracy_score(y_test, y_pred) * 100:.2f}%")
-        print("Confusion Matrix:")
-        print(confusion_matrix(y_test, y_pred))
-        print("-" * 50)
+
+        logger.info(f"Overall Accuracy: {accuracy_score(y_test, y_pred) * 100:.2f}%")
+        logger.info(f"Confusion Matrix:\n{confusion_matrix(y_test, y_pred)}")
+        logger.info("-" * 50)
 
     # 6. Final API Deployment Prep: Apply SMOTE to ALL data, then train
-    print("\nRetraining Proposed Model on 100% of SMOTE data for API deployment...")
+    logger.info("Retraining Proposed Model on 100% of SMOTE data for API deployment...")
     X_full_smote, y_full_smote = smote.fit_resample(X_supervised, y_supervised)
-    
+
     final_model = models["Random Forest (Proposed Model)"]
     final_model.fit(X_full_smote, y_full_smote)
 
     # Save the final AI brain
-    joblib.dump(final_model, "theft_detection_model.pkl")
-    joblib.dump(list(X_supervised.columns), "model_features.pkl")
+    joblib.dump(final_model, os.path.join(BASE_DIR, "theft_detection_model.pkl"))
+    joblib.dump(list(X_supervised.columns), os.path.join(BASE_DIR, "model_features.pkl"))
 
-    print("\nSUCCESS: SMOTE Pipeline Complete! Model saved for API.")
+    logger.info("SUCCESS: SMOTE Pipeline Complete! Model saved for API.")
 
 if __name__ == "__main__":
     run_pipeline()
