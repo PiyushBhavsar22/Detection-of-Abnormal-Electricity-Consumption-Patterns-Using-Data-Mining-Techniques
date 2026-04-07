@@ -16,7 +16,7 @@ def test_normal_behavior():
     payload = {
         "total_daily_kwh": 12.5,
         "peak_to_offpeak_ratio": 1.1,
-        "variance_kwh": 2.4,
+        "daily_variance": 2.4,
         "temperature_celsius": 18.0,
         "additional_features": {} # Missing demographics default to 0 gracefully
     }
@@ -30,7 +30,7 @@ def test_thief_behavior():
     payload = {
         "total_daily_kwh": 150.5, # Highly suspicious usage
         "peak_to_offpeak_ratio": 8.5, # Massive spikes
-        "variance_kwh": 45.0,
+        "daily_variance": 45.0,
         "temperature_celsius": 22.0,
         "additional_features": {}
     }
@@ -44,7 +44,7 @@ def test_validator_negative_usage():
     payload = {
         "total_daily_kwh": -50.0, # IMPOSSIBLE!
         "peak_to_offpeak_ratio": 1.1,
-        "variance_kwh": 2.4,
+        "daily_variance": 2.4,
         "temperature_celsius": 18.0
     }
     response = client.post("/predict_theft", json=payload)
@@ -57,7 +57,7 @@ def test_validator_extreme_weather():
     payload = {
         "total_daily_kwh": 15.0,
         "peak_to_offpeak_ratio": 1.1,
-        "variance_kwh": 2.4,
+        "daily_variance": 2.4,
         "temperature_celsius": 200.0 # IMPOSSIBLE ON EARTH!
     }
     response = client.post("/predict_theft", json=payload)
