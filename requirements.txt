@@ -11,3 +11,4 @@ imbalanced-learn
 shap
 matplotlib
 seaborn
+plotly

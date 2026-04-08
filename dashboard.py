@@ -7,6 +7,11 @@ import pandas as pd
 import io
 import json
 import time
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import shap
+import numpy as np
 
 # Configuration
 API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
@@ -18,6 +23,586 @@ st.set_page_config(page_title="Electricity Theft Detector", page_icon="⚡", lay
 # Initialize session state for prediction history
 if 'prediction_history' not in st.session_state:
     st.session_state.prediction_history = []
+
+# Initialize SHAP explainer cache
+if 'shap_explainer' not in st.session_state:
+    st.session_state.shap_explainer = None
+
+# ============================================================================
+# VISUALIZATION HELPER FUNCTIONS
+# ============================================================================
+
+def create_risk_gauge(probability_percent):
+    """Create a gauge chart showing theft risk probability"""
+    fig = go.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = probability_percent,
+        title = {'text': "Theft Risk Probability", 'font': {'size': 20, 'color': '#e2e8f0'}},
+        number = {'suffix': "%", 'font': {'size': 40, 'color': '#f8fafc'}},
+        gauge = {
+            'axis': {'range': [None, 100], 'tickwidth': 1, 'tickcolor': "#cbd5e1"},
+            'bar': {'color': "#1e293b"},
+            'bgcolor': "rgba(2, 6, 23, 0.3)",
+            'borderwidth': 2,
+            'bordercolor': "rgba(148, 163, 184, 0.3)",
+            'steps': [
+                {'range': [0, 40], 'color': '#10b981'},  # Green - LOW
+                {'range': [40, 60], 'color': '#f59e0b'},  # Yellow - MEDIUM
+                {'range': [60, 100], 'color': '#ef4444'}  # Red - HIGH
+            ],
+            'threshold': {
+                'line': {'color': "#f8fafc", 'width': 4},
+                'thickness': 0.75,
+                'value': probability_percent
+            }
+        }
+    ))
+    
+    fig.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font={'color': "#e2e8f0"},
+        height=300,
+        margin=dict(l=20, r=20, t=50, b=20)
+    )
+    
+    return fig
+
+def create_feature_importance_waterfall(model, feature_names, input_data):
+    """Create SHAP waterfall chart showing feature contributions"""
+    try:
+        # Initialize SHAP explainer if not cached
+        if st.session_state.shap_explainer is None:
+            st.session_state.shap_explainer = shap.TreeExplainer(model)
+        
+        explainer = st.session_state.shap_explainer
+        
+        # Ensure input_data is proper numpy array format
+        input_array = input_data.values if hasattr(input_data, 'values') else input_data
+        
+        # Calculate SHAP values
+        shap_values = explainer.shap_values(input_array)
+        
+        # Get SHAP values for the positive class (thief)
+        if isinstance(shap_values, list):
+            shap_vals = shap_values[1][0]  # Class 1 (thief)
+        else:
+            shap_vals = shap_values[0]
+        
+        # Get base value and expected value
+        base_value = explainer.expected_value
+        if isinstance(base_value, list):
+            base_value = base_value[1]
+        
+        # Create dataframe for plotting - ensure we flatten the values properly
+        input_values = input_array[0] if len(input_array.shape) > 1 else input_array
+        
+        feature_data = pd.DataFrame({
+            'feature': feature_names,
+            'value': input_values,
+            'shap': shap_vals
+        })
+        
+        # Sort by absolute SHAP value and take top 5
+        feature_data['abs_shap'] = abs(feature_data['shap'])
+        feature_data = feature_data.sort_values('abs_shap', ascending=False).head(5)
+        
+        # Create waterfall chart
+        fig = go.Figure()
+        
+        # Add bars
+        colors = ['#ef4444' if x > 0 else '#10b981' for x in feature_data['shap']]
+        
+        fig.add_trace(go.Bar(
+            x=feature_data['shap'],
+            y=feature_data['feature'],
+            orientation='h',
+            marker=dict(color=colors),
+            text=[f"{x:+.3f}" for x in feature_data['shap']],
+            textposition='outside',
+            hovertemplate='<b>%{y}</b><br>SHAP value: %{x:.3f}<extra></extra>'
+        ))
+        
+        fig.update_layout(
+            title={'text': 'Top 5 Feature Contributions', 'font': {'size': 18, 'color': '#e2e8f0'}},
+            xaxis_title='SHAP Value (Impact on Prediction)',
+            yaxis_title='',
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(2, 6, 23, 0.3)',
+            font={'color': "#e2e8f0"},
+            height=350,
+            margin=dict(l=20, r=80, t=50, b=50),
+            xaxis=dict(gridcolor='rgba(148, 163, 184, 0.2)', zeroline=True, zerolinecolor='#cbd5e1')
+        )
+        
+        return fig
+        
+    except Exception as e:
+        st.error(f"Error generating feature importance: {str(e)}")
+        return None
+
+def create_confidence_bar(probabilities):
+    """Create horizontal bar showing prediction confidence"""
+    if len(probabilities) < 2:
+        prob_normal = 1 - probabilities[0]
+        prob_thief = probabilities[0]
+    else:
+        prob_normal = probabilities[0]
+        prob_thief = probabilities[1]
+    
+    fig = go.Figure()
+    
+    # Add stacked bar
+    fig.add_trace(go.Bar(
+        y=['Prediction'],
+        x=[prob_normal * 100],
+        name='Normal User',
+        orientation='h',
+        marker=dict(color='#10b981'),
+        text=f'{prob_normal*100:.1f}%',
+        textposition='inside',
+        hovertemplate='Normal User: %{x:.2f}%<extra></extra>'
+    ))
+    
+    fig.add_trace(go.Bar(
+        y=['Prediction'],
+        x=[prob_thief * 100],
+        name='Potential Thief',
+        orientation='h',
+        marker=dict(color='#ef4444'),
+        text=f'{prob_thief*100:.1f}%',
+        textposition='inside',
+        hovertemplate='Potential Thief: %{x:.2f}%<extra></extra>'
+    ))
+    
+    fig.update_layout(
+        barmode='stack',
+        title={'text': 'Model Confidence Distribution', 'font': {'size': 18, 'color': '#e2e8f0'}},
+        xaxis=dict(
+            title='Confidence (%)',
+            range=[0, 100],
+            gridcolor='rgba(148, 163, 184, 0.2)'
+        ),
+        yaxis=dict(showticklabels=False),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(2, 6, 23, 0.3)',
+        font={'color': "#e2e8f0"},
+        height=200,
+        margin=dict(l=20, r=20, t=50, b=50),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    
+    return fig
+
+# ============================================================================
+# PHASE 2: MODEL PERFORMANCE VISUALIZATION FUNCTIONS
+# ============================================================================
+
+def create_confusion_matrix_heatmap(y_true, y_pred):
+    """Create interactive confusion matrix heatmap"""
+    from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
+    
+    # Calculate confusion matrix
+    cm = confusion_matrix(y_true, y_pred)
+    
+    # Create labels
+    labels = ['Normal User', 'Thief']
+    
+    # Create annotated heatmap
+    fig = go.Figure(data=go.Heatmap(
+        z=cm,
+        x=labels,
+        y=labels,
+        text=cm,
+        texttemplate='%{text}',
+        textfont={"size": 20, "color": "white"},
+        colorscale=[[0, '#1e293b'], [0.5, '#3b82f6'], [1, '#ef4444']],
+        showscale=False,
+        hovertemplate='Predicted: %{x}<br>Actual: %{y}<br>Count: %{z}<extra></extra>'
+    ))
+    
+    # Calculate metrics
+    accuracy = accuracy_score(y_true, y_pred)
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    
+    # Add annotations for metrics
+    metrics_text = f"Accuracy: {accuracy:.2%} | Precision: {precision:.2%} | Recall: {recall:.2%} | F1: {f1:.2%}"
+    
+    fig.update_layout(
+        title={
+            'text': f'Confusion Matrix<br><sub>{metrics_text}</sub>',
+            'font': {'size': 18, 'color': '#e2e8f0'}
+        },
+        xaxis_title='Predicted Label',
+        yaxis_title='True Label',
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(2, 6, 23, 0.3)',
+        font={'color': "#e2e8f0"},
+        height=400,
+        margin=dict(l=80, r=20, t=80, b=50),
+        xaxis=dict(side='bottom'),
+        yaxis=dict(autorange='reversed')
+    )
+    
+    return fig, {'accuracy': accuracy, 'precision': precision, 'recall': recall, 'f1': f1}
+
+def create_roc_curve(y_true, y_proba):
+    """Create ROC curve with AUC score"""
+    from sklearn.metrics import roc_curve, auc
+    
+    # Calculate ROC curve
+    fpr, tpr, thresholds = roc_curve(y_true, y_proba)
+    roc_auc = auc(fpr, tpr)
+    
+    fig = go.Figure()
+    
+    # Add ROC curve
+    fig.add_trace(go.Scatter(
+        x=fpr,
+        y=tpr,
+        mode='lines',
+        name=f'ROC Curve (AUC = {roc_auc:.3f})',
+        line=dict(color='#3b82f6', width=3),
+        hovertemplate='FPR: %{x:.3f}<br>TPR: %{y:.3f}<extra></extra>'
+    ))
+    
+    # Add diagonal reference line
+    fig.add_trace(go.Scatter(
+        x=[0, 1],
+        y=[0, 1],
+        mode='lines',
+        name='Random Classifier',
+        line=dict(color='#ef4444', width=2, dash='dash'),
+        hovertemplate='Random (AUC = 0.5)<extra></extra>'
+    ))
+    
+    fig.update_layout(
+        title={
+            'text': f'ROC Curve (AUC = {roc_auc:.3f})',
+            'font': {'size': 18, 'color': '#e2e8f0'}
+        },
+        xaxis_title='False Positive Rate',
+        yaxis_title='True Positive Rate',
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(2, 6, 23, 0.3)',
+        font={'color': "#e2e8f0"},
+        height=400,
+        margin=dict(l=50, r=20, t=50, b=50),
+        xaxis=dict(range=[0, 1], gridcolor='rgba(148, 163, 184, 0.2)'),
+        yaxis=dict(range=[0, 1], gridcolor='rgba(148, 163, 184, 0.2)'),
+        showlegend=True,
+        legend=dict(x=0.6, y=0.1, bgcolor='rgba(2, 6, 23, 0.8)')
+    )
+    
+    return fig, roc_auc
+
+def create_precision_recall_curve(y_true, y_proba):
+    """Create Precision-Recall curve"""
+    from sklearn.metrics import precision_recall_curve, average_precision_score
+    
+    # Calculate precision-recall curve
+    precision, recall, thresholds = precision_recall_curve(y_true, y_proba)
+    avg_precision = average_precision_score(y_true, y_proba)
+    
+    fig = go.Figure()
+    
+    # Add PR curve
+    fig.add_trace(go.Scatter(
+        x=recall,
+        y=precision,
+        mode='lines',
+        name=f'PR Curve (AP = {avg_precision:.3f})',
+        line=dict(color='#10b981', width=3),
+        fill='tozeroy',
+        fillcolor='rgba(16, 185, 129, 0.1)',
+        hovertemplate='Recall: %{x:.3f}<br>Precision: %{y:.3f}<extra></extra>'
+    ))
+    
+    # Add baseline
+    baseline = sum(y_true) / len(y_true)
+    fig.add_trace(go.Scatter(
+        x=[0, 1],
+        y=[baseline, baseline],
+        mode='lines',
+        name=f'Baseline (AP = {baseline:.3f})',
+        line=dict(color='#f59e0b', width=2, dash='dash'),
+        hovertemplate='Baseline<extra></extra>'
+    ))
+    
+    fig.update_layout(
+        title={
+            'text': f'Precision-Recall Curve (AP = {avg_precision:.3f})',
+            'font': {'size': 18, 'color': '#e2e8f0'}
+        },
+        xaxis_title='Recall',
+        yaxis_title='Precision',
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(2, 6, 23, 0.3)',
+        font={'color': "#e2e8f0"},
+        height=400,
+        margin=dict(l=50, r=20, t=50, b=50),
+        xaxis=dict(range=[0, 1], gridcolor='rgba(148, 163, 184, 0.2)'),
+        yaxis=dict(range=[0, 1], gridcolor='rgba(148, 163, 184, 0.2)'),
+        showlegend=True,
+        legend=dict(x=0.6, y=0.9, bgcolor='rgba(2, 6, 23, 0.8)')
+    )
+    
+    return fig, avg_precision
+
+# ============================================================================
+# PHASE 3: BATCH & HISTORY ANALYTICS VISUALIZATION FUNCTIONS
+# ============================================================================
+
+def create_risk_distribution_pie(risk_counts):
+    """Create pie chart showing risk level distribution"""
+    labels = ['HIGH', 'MEDIUM', 'LOW']
+    values = [risk_counts.get('HIGH', 0), risk_counts.get('MEDIUM', 0), risk_counts.get('LOW', 0)]
+    colors = ['#ef4444', '#f59e0b', '#10b981']
+    
+    fig = go.Figure(data=[go.Pie(
+        labels=labels,
+        values=values,
+        marker=dict(colors=colors, line=dict(color='#1e293b', width=2)),
+        textinfo='label+percent+value',
+        textfont=dict(size=14, color='white'),
+        hovertemplate='<b>%{label}</b><br>Count: %{value}<br>Percentage: %{percent}<extra></extra>',
+        hole=0.4  # Donut style
+    )])
+    
+    total = sum(values)
+    fig.update_layout(
+        title={
+            'text': f'Risk Level Distribution<br><sub>Total: {total} predictions</sub>',
+            'font': {'size': 18, 'color': '#e2e8f0'}
+        },
+        paper_bgcolor='rgba(0,0,0,0)',
+        font={'color': "#e2e8f0"},
+        height=400,
+        margin=dict(l=20, r=20, t=60, b=20),
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.1,
+            xanchor="center",
+            x=0.5,
+            bgcolor='rgba(2, 6, 23, 0.8)'
+        )
+    )
+    
+    return fig
+
+def create_prediction_timeline(history_data):
+    """Create timeline chart from prediction history"""
+    if not history_data or len(history_data) == 0:
+        return None
+    
+    # Convert to DataFrame for easier manipulation
+    df = pd.DataFrame(history_data)
+    
+    # Limit to last 100 predictions for performance
+    df = df.tail(100)
+    
+    # Parse timestamps and probabilities
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['prob_numeric'] = df['probability'].str.replace('%', '').astype(float)
+    
+    # Color mapping for risk levels
+    color_map = {'HIGH': '#ef4444', 'MEDIUM': '#f59e0b', 'LOW': '#10b981'}
+    df['color'] = df['risk_level'].map(color_map)
+    
+    fig = go.Figure()
+    
+    # Add scatter plot for each risk level
+    for risk in ['HIGH', 'MEDIUM', 'LOW']:
+        df_risk = df[df['risk_level'] == risk]
+        if len(df_risk) > 0:
+            fig.add_trace(go.Scatter(
+                x=df_risk['timestamp'],
+                y=df_risk['prob_numeric'],
+                mode='markers+lines',
+                name=risk,
+                marker=dict(
+                    size=10,
+                    color=color_map[risk],
+                    line=dict(width=1, color='white')
+                ),
+                line=dict(color=color_map[risk], width=2),
+                hovertemplate='<b>%{text}</b><br>Time: %{x}<br>Probability: %{y:.1f}%<extra></extra>',
+                text=[risk] * len(df_risk)
+            ))
+    
+    # Add threshold lines
+    fig.add_hline(y=60, line_dash="dash", line_color="#ef4444", 
+                  annotation_text="HIGH threshold (60%)", annotation_position="right")
+    fig.add_hline(y=40, line_dash="dash", line_color="#f59e0b",
+                  annotation_text="MEDIUM threshold (40%)", annotation_position="right")
+    
+    fig.update_layout(
+        title={
+            'text': f'Prediction Timeline (Last {len(df)} predictions)',
+            'font': {'size': 18, 'color': '#e2e8f0'}
+        },
+        xaxis_title='Timestamp',
+        yaxis_title='Theft Probability (%)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(2, 6, 23, 0.3)',
+        font={'color': "#e2e8f0"},
+        height=400,
+        margin=dict(l=50, r=20, t=50, b=50),
+        xaxis=dict(gridcolor='rgba(148, 163, 184, 0.2)'),
+        yaxis=dict(range=[0, 105], gridcolor='rgba(148, 163, 184, 0.2)'),
+        showlegend=True,
+        legend=dict(x=0.02, y=0.98, bgcolor='rgba(2, 6, 23, 0.8)'),
+        hovermode='closest'
+    )
+    
+    return fig
+
+def create_feature_distribution_violin(batch_data):
+    """Create violin plots for feature distributions by risk level"""
+    if not batch_data or len(batch_data) == 0:
+        return None
+    
+    df = pd.DataFrame(batch_data)
+    
+    # Select key features to display
+    key_features = ['total_daily_kwh', 'daily_variance', 'peak_to_offpeak_ratio', 'temperatureMax']
+    
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=[f.replace('_', ' ').title() for f in key_features],
+        vertical_spacing=0.12,
+        horizontal_spacing=0.1
+    )
+    
+    color_map = {'HIGH': '#ef4444', 'MEDIUM': '#f59e0b', 'LOW': '#10b981'}
+    
+    for idx, feature in enumerate(key_features):
+        row = (idx // 2) + 1
+        col = (idx % 2) + 1
+        
+        for risk in ['HIGH', 'MEDIUM', 'LOW']:
+            df_risk = df[df['risk_level'] == risk]
+            if len(df_risk) > 0 and feature in df_risk.columns:
+                # Extract values from inputs dict if needed
+                if df_risk[feature].dtype == 'object':
+                    try:
+                        values = df_risk['inputs'].apply(lambda x: x.get(feature, 0))
+                    except:
+                        continue
+                else:
+                    values = df_risk[feature]
+                
+                fig.add_trace(
+                    go.Violin(
+                        y=values,
+                        name=risk,
+                        marker_color=color_map[risk],
+                        showlegend=(idx == 0),  # Only show legend once
+                        legendgroup=risk,
+                        scalegroup=risk,
+                        line_color='white',
+                        opacity=0.7
+                    ),
+                    row=row, col=col
+                )
+    
+    fig.update_layout(
+        title={
+            'text': 'Feature Distributions by Risk Level',
+            'font': {'size': 18, 'color': '#e2e8f0'}
+        },
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(2, 6, 23, 0.3)',
+        font={'color': "#e2e8f0"},
+        height=600,
+        margin=dict(l=50, r=20, t=80, b=50),
+        showlegend=True,
+        legend=dict(x=0.85, y=0.98, bgcolor='rgba(2, 6, 23, 0.8)'),
+        violinmode='group'
+    )
+    
+    fig.update_yaxes(gridcolor='rgba(148, 163, 184, 0.2)')
+    
+    return fig
+
+def create_risk_heatmap(feature1='total_daily_kwh', feature2='daily_variance', model=None, feature_names=None):
+    """Create 2D heatmap showing risk levels across feature ranges"""
+    if model is None or feature_names is None:
+        return None
+    
+    # Define ranges for the two features
+    f1_range = np.linspace(0, 150, 30)  # For total_daily_kwh
+    f2_range = np.linspace(0, 80, 30)   # For daily_variance
+    
+    # Create a grid of predictions
+    risk_grid = np.zeros((len(f2_range), len(f1_range)))
+    
+    for i, f2_val in enumerate(f2_range):
+        for j, f1_val in enumerate(f1_range):
+            # Create input with default values
+            input_dict = {
+                'total_daily_kwh': 15.0,
+                'daily_variance': 2.5,
+                'peak_sum': 6.0,
+                'off_peak_sum': 9.0,
+                'peak_to_offpeak_ratio': 0.67,
+                'temperatureMax': 20.0,
+                'temp_hr_std': 2.0,
+                'is_holiday': 0
+            }
+            # Override with grid values
+            input_dict[feature1] = f1_val
+            input_dict[feature2] = f2_val
+            
+            # Predict
+            input_df = pd.DataFrame([input_dict])[feature_names]
+            prob = model.predict_proba(input_df)[0][1] * 100
+            risk_grid[i, j] = prob
+    
+    fig = go.Figure(data=go.Heatmap(
+        x=f1_range,
+        y=f2_range,
+        z=risk_grid,
+        colorscale=[
+            [0, '#10b981'],      # Green (LOW)
+            [0.4, '#10b981'],
+            [0.4, '#f59e0b'],    # Yellow (MEDIUM)
+            [0.6, '#f59e0b'],
+            [0.6, '#ef4444'],    # Red (HIGH)
+            [1, '#ef4444']
+        ],
+        colorbar=dict(
+            title="Theft<br>Probability<br>(%)",
+            titleside="right",
+            tickmode="linear",
+            tick0=0,
+            dtick=20,
+            titlefont=dict(color='#e2e8f0'),
+            tickfont=dict(color='#e2e8f0')
+        ),
+        hovertemplate=f'{feature1}: %{{x:.1f}}<br>{feature2}: %{{y:.1f}}<br>Risk: %{{z:.1f}}%<extra></extra>'
+    ))
+    
+    fig.update_layout(
+        title={
+            'text': f'Risk Heatmap: {feature1.replace("_", " ").title()} vs {feature2.replace("_", " ").title()}',
+            'font': {'size': 18, 'color': '#e2e8f0'}
+        },
+        xaxis_title=feature1.replace('_', ' ').title(),
+        yaxis_title=feature2.replace('_', ' ').title(),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(2, 6, 23, 0.3)',
+        font={'color': "#e2e8f0"},
+        height=500,
+        margin=dict(l=80, r=100, t=60, b=60)
+    )
+    
+    return fig
 
 st.markdown(
     """
@@ -246,6 +831,64 @@ with st.expander("📊 Model Information & Configuration", expanded=False):
         *Note: Metrics from independent test set with proper SMOTE handling on training data only.*
         """)
         
+        # PHASE 2: Add Performance Visualizations
+        st.markdown("---")
+        st.markdown("### 📊 Performance Visualizations")
+        
+        # Load test data
+        try:
+            X_test = pd.read_csv('X_test_sample.csv')
+            y_test = pd.read_csv('y_test_sample.csv').values.ravel()
+            
+            # Generate predictions
+            y_pred = model.predict(X_test)
+            y_proba = model.predict_proba(X_test)[:, 1]  # Probability for positive class
+            
+            # Create tabs for different visualizations
+            tab1, tab2, tab3 = st.tabs(["📉 Confusion Matrix", "📈 ROC Curve", "📊 Precision-Recall"])
+            
+            with tab1:
+                cm_fig, metrics = create_confusion_matrix_heatmap(y_test, y_pred)
+                st.plotly_chart(cm_fig, use_container_width=True)
+                
+                # Display metrics in columns
+                col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+                with col_p1:
+                    st.metric("Accuracy", f"{metrics['accuracy']:.2%}")
+                with col_p2:
+                    st.metric("Precision", f"{metrics['precision']:.2%}")
+                with col_p3:
+                    st.metric("Recall", f"{metrics['recall']:.2%}")
+                with col_p4:
+                    st.metric("F1-Score", f"{metrics['f1']:.2%}")
+            
+            with tab2:
+                roc_fig, auc_score = create_roc_curve(y_test, y_proba)
+                st.plotly_chart(roc_fig, use_container_width=True)
+                
+                st.info(f"""
+                **ROC Curve Interpretation:**
+                - AUC = {auc_score:.3f} (Area Under Curve)
+                - AUC close to 1.0 indicates excellent model performance
+                - The curve shows the trade-off between True Positive Rate and False Positive Rate
+                """)
+            
+            with tab3:
+                pr_fig, ap_score = create_precision_recall_curve(y_test, y_proba)
+                st.plotly_chart(pr_fig, use_container_width=True)
+                
+                st.info(f"""
+                **Precision-Recall Curve Interpretation:**
+                - Average Precision = {ap_score:.3f}
+                - Shows the trade-off between precision and recall at different thresholds
+                - Higher area under curve indicates better model performance
+                """)
+                
+        except FileNotFoundError:
+            st.warning("⚠️ Test data files not found. Run `pipeline.py` to generate test samples.")
+        except Exception as e:
+            st.warning(f"⚠️ Could not load performance visualizations: {str(e)}")
+        
     except FileNotFoundError:
         st.error("⚠️ Model files not found. Please ensure `model_features.pkl` and `theft_detection_model.pkl` exist.")
     except Exception as e:
@@ -386,7 +1029,27 @@ with st.expander("Upload CSV for Bulk Predictions", expanded=False):
                         low_risk = len(results_df[results_df['risk_level'] == 'LOW'])
                         st.metric("✅ Low Risk", low_risk)
                     
-                    # Display full results
+                    # PHASE 3: Add Risk Distribution Pie Chart
+                    st.markdown("---")
+                    st.markdown("#### 📊 Risk Distribution")
+                    risk_counts = {
+                        'HIGH': high_risk,
+                        'MEDIUM': medium_risk,
+                        'LOW': low_risk
+                    }
+                    pie_fig = create_risk_distribution_pie(risk_counts)
+                    st.plotly_chart(pie_fig, use_container_width=True)
+                    
+                    # PHASE 3: Add Feature Distribution Violin Plots
+                    st.markdown("---")
+                    st.markdown("#### 🎻 Feature Distributions by Risk Level")
+                    violin_fig = create_feature_distribution_violin(results)
+                    if violin_fig:
+                        st.plotly_chart(violin_fig, use_container_width=True)
+                    
+                    # Display full results table
+                    st.markdown("---")
+                    st.markdown("#### 📋 Detailed Results")
                     st.dataframe(results_df, use_container_width=True, height=400)
                     
                     # Export button
@@ -473,6 +1136,51 @@ if st.button("🔍 Run Fraud Analysis", type="primary", use_container_width=True
 
                 st.info(f"**Analysis:** {result['message']}")
                 
+                # ============================================================================
+                # PHASE 1 VISUALIZATIONS: Risk Gauge & Confidence Bar
+                # ============================================================================
+                st.markdown("---")
+                st.markdown("### 📊 Visual Analytics")
+                
+                # Extract probability as float
+                prob_str = result["thief_probability"].replace('%', '')
+                probability_percent = float(prob_str)
+                
+                # 1. Risk Gauge Chart
+                st.markdown("#### 🎯 Risk Gauge")
+                gauge_fig = create_risk_gauge(probability_percent)
+                st.plotly_chart(gauge_fig, use_container_width=True)
+                
+                # 2. Confidence Distribution Bar
+                st.markdown("#### 📈 Confidence Distribution")
+                try:
+                    model = joblib.load('theft_detection_model.pkl')
+                    model_features = joblib.load('model_features.pkl')
+                    
+                    # Prepare input dataframe
+                    input_dict = {
+                        'total_daily_kwh': total_daily_kwh,
+                        'daily_variance': daily_variance,
+                        'peak_sum': peak_sum,
+                        'off_peak_sum': off_peak_sum,
+                        'peak_to_offpeak_ratio': peak_to_offpeak_ratio,
+                        'temperatureMax': temperatureMax,
+                        'temp_hr_std': temp_hr_std,
+                        'is_holiday': int(is_holiday)
+                    }
+                    input_df = pd.DataFrame([input_dict])
+                    input_df = input_df[model_features]
+                    
+                    # Get prediction probabilities
+                    probabilities = model.predict_proba(input_df)[0]
+                    confidence_fig = create_confidence_bar(probabilities)
+                    st.plotly_chart(confidence_fig, use_container_width=True)
+                    
+                except Exception as e:
+                    st.warning("Confidence chart temporarily unavailable")
+                
+                st.markdown("---")
+                
                 # Add to prediction history
                 st.session_state.prediction_history.append({
                     'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -526,7 +1234,37 @@ if st.session_state.prediction_history:
             low_count = len(history_df[history_df['risk_level'] == 'LOW'])
             st.metric("✅ Low Risk", low_count)
         
+        # PHASE 3: Add Prediction Timeline
+        st.markdown("---")
+        st.markdown("### 📈 Prediction Timeline")
+        timeline_fig = create_prediction_timeline(st.session_state.prediction_history)
+        if timeline_fig:
+            st.plotly_chart(timeline_fig, use_container_width=True)
+        else:
+            st.info("Timeline will appear after making predictions.")
+        
+        # PHASE 3: Add Risk Heatmap
+        st.markdown("---")
+        st.markdown("### 🗺️ Risk Heatmap Explorer")
+        try:
+            model = joblib.load('theft_detection_model.pkl')
+            model_features = joblib.load('model_features.pkl')
+            
+            col_feat1, col_feat2 = st.columns(2)
+            with col_feat1:
+                feature1 = st.selectbox("Feature 1 (X-axis)", model_features, index=0)
+            with col_feat2:
+                feature2 = st.selectbox("Feature 2 (Y-axis)", model_features, index=1)
+            
+            heatmap_fig = create_risk_heatmap(feature1, feature2, model, model_features)
+            if heatmap_fig:
+                st.plotly_chart(heatmap_fig, use_container_width=True)
+                st.info(f"**Interpretation:** Darker red areas indicate higher theft probability when {feature1} and {feature2} have those combined values.")
+        except Exception as e:
+            st.warning(f"Heatmap temporarily unavailable: {str(e)}")
+        
         # Display history table
+        st.markdown("---")
         st.markdown("### 📋 Full History")
         
         # Create simplified view for display
