@@ -530,79 +530,6 @@ def create_feature_distribution_violin(batch_data):
     
     return fig
 
-def create_risk_heatmap(feature1='total_daily_kwh', feature2='daily_variance', model=None, feature_names=None):
-    """Create 2D heatmap showing risk levels across feature ranges"""
-    if model is None or feature_names is None:
-        return None
-    
-    # Define ranges for the two features
-    f1_range = np.linspace(0, 150, 30)  # For total_daily_kwh
-    f2_range = np.linspace(0, 80, 30)   # For daily_variance
-    
-    # Create a grid of predictions
-    risk_grid = np.zeros((len(f2_range), len(f1_range)))
-    
-    for i, f2_val in enumerate(f2_range):
-        for j, f1_val in enumerate(f1_range):
-            # Create input with default values
-            input_dict = {
-                'total_daily_kwh': 15.0,
-                'daily_variance': 2.5,
-                'peak_sum': 6.0,
-                'off_peak_sum': 9.0,
-                'peak_to_offpeak_ratio': 0.67,
-                'temperatureMax': 20.0,
-                'temp_hr_std': 2.0,
-                'is_holiday': 0
-            }
-            # Override with grid values
-            input_dict[feature1] = f1_val
-            input_dict[feature2] = f2_val
-            
-            # Predict
-            input_df = pd.DataFrame([input_dict])[feature_names]
-            prob = model.predict_proba(input_df)[0][1] * 100
-            risk_grid[i, j] = prob
-    
-    fig = go.Figure(data=go.Heatmap(
-        x=f1_range,
-        y=f2_range,
-        z=risk_grid,
-        colorscale=[
-            [0, '#10b981'],      # Green (LOW)
-            [0.4, '#10b981'],
-            [0.4, '#f59e0b'],    # Yellow (MEDIUM)
-            [0.6, '#f59e0b'],
-            [0.6, '#ef4444'],    # Red (HIGH)
-            [1, '#ef4444']
-        ],
-        colorbar=dict(
-            title="Theft<br>Probability<br>(%)",
-            titleside="right",
-            tickmode="linear",
-            tick0=0,
-            dtick=20,
-            titlefont=dict(color='#e2e8f0'),
-            tickfont=dict(color='#e2e8f0')
-        ),
-        hovertemplate=f'{feature1}: %{{x:.1f}}<br>{feature2}: %{{y:.1f}}<br>Risk: %{{z:.1f}}%<extra></extra>'
-    ))
-    
-    fig.update_layout(
-        title={
-            'text': f'Risk Heatmap: {feature1.replace("_", " ").title()} vs {feature2.replace("_", " ").title()}',
-            'font': {'size': 18, 'color': '#e2e8f0'}
-        },
-        xaxis_title=feature1.replace('_', ' ').title(),
-        yaxis_title=feature2.replace('_', ' ').title(),
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(2, 6, 23, 0.3)',
-        font={'color': "#e2e8f0"},
-        height=500,
-        margin=dict(l=80, r=100, t=60, b=60)
-    )
-    
-    return fig
 
 st.markdown(
     """
@@ -1242,26 +1169,6 @@ if st.session_state.prediction_history:
             st.plotly_chart(timeline_fig, use_container_width=True)
         else:
             st.info("Timeline will appear after making predictions.")
-        
-        # PHASE 3: Add Risk Heatmap
-        st.markdown("---")
-        st.markdown("### 🗺️ Risk Heatmap Explorer")
-        try:
-            model = joblib.load('theft_detection_model.pkl')
-            model_features = joblib.load('model_features.pkl')
-            
-            col_feat1, col_feat2 = st.columns(2)
-            with col_feat1:
-                feature1 = st.selectbox("Feature 1 (X-axis)", model_features, index=0)
-            with col_feat2:
-                feature2 = st.selectbox("Feature 2 (Y-axis)", model_features, index=1)
-            
-            heatmap_fig = create_risk_heatmap(feature1, feature2, model, model_features)
-            if heatmap_fig:
-                st.plotly_chart(heatmap_fig, use_container_width=True)
-                st.info(f"**Interpretation:** Darker red areas indicate higher theft probability when {feature1} and {feature2} have those combined values.")
-        except Exception as e:
-            st.warning(f"Heatmap temporarily unavailable: {str(e)}")
         
         # Display history table
         st.markdown("---")
