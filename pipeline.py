@@ -28,16 +28,14 @@ RANDOM_STATE = 42
 TEST_SIZE = 0.2
 
 def run_pipeline():
-    logger.info("==========================================")
+    
     logger.info("STARTING ADVANCED ML PIPELINE")
-    logger.info("==========================================")
-
+    
     # Create output directory if not exists
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # ==========================================
     # PHASE 1: LOAD ALL DATASETS
-    # ==========================================
+
     logger.info("--- PHASE 1: LOADING DATA ---")
 
     block_folder = os.path.join(DATA_DIR, "hhblock_dataset")
@@ -65,9 +63,8 @@ def run_pipeline():
     df_weather_hourly = pd.read_csv(os.path.join(DATA_DIR, "weather_hourly_darksky.csv"), encoding='latin-1')
     df_acorn = pd.read_csv(os.path.join(DATA_DIR, "acorn_details.csv"), encoding='latin-1')
 
-    # ==========================================
     # PHASE 2: ADVANCED PREPROCESSING & MERGING
-    # ==========================================
+    
     logger.info("--- PHASE 2: PREPROCESSING & MERGING ---")
     
     df.columns = df.columns.str.strip()
@@ -115,7 +112,6 @@ def run_pipeline():
     df = df.dropna(subset=[date_col])
     df['day_formatted'] = df[date_col].dt.normalize()
 
-    # Handle different data formats
     if 'energy_kwh' in df.columns:
         df['energy_kwh'] = pd.to_numeric(df['energy_kwh'], errors='coerce').fillna(0)
     elif 'energy(kWh/hh)' in df.columns:
@@ -136,15 +132,13 @@ def run_pipeline():
         else:
             raise ValueError(f"No energy column found. Available columns: {df.columns.tolist()}")
 
-    # ==========================================
     # PHASE 3: FEATURE ENGINEERING
-    # ==========================================
+    
     logger.info("--- PHASE 3: FEATURE ENGINEERING ---")
-
+    
     # Calculate hour if not already computed from half-hourly data
     if 'hour' not in df.columns:
         df['hour'] = df[date_col].dt.hour
-
     df['is_peak'] = df['hour'].apply(lambda x: 1 if 17 <= x <= 21 else 0)
 
     # Calculate daily aggregates safely (avoiding lambda with outer scope reference)
@@ -174,9 +168,8 @@ def run_pipeline():
     daily_features['is_holiday'] = daily_features['is_holiday'].fillna(0).astype(int)
     daily_features.fillna(0, inplace=True) 
 
-    # ==========================================
     # PHASE 4: UNSUPERVISED ANOMALY DETECTION
-    # ==========================================
+    
     logger.info("--- PHASE 4: UNSUPERVISED LEARNING (Isolation Forest) ---")
     ml_features = ['total_daily_kwh', 'daily_variance', 'peak_sum', 'off_peak_sum',
                    'peak_to_offpeak_ratio', 'temperatureMax', 'temp_hr_std', 'is_holiday']
@@ -187,10 +180,8 @@ def run_pipeline():
     daily_features['anomaly_score'] = iso_forest.fit_predict(X_unsupervised)
     daily_features['is_anomaly'] = daily_features['anomaly_score'].apply(lambda x: 1 if x == -1 else 0)
 
-    # ==========================================
-    # PHASE 5: SUPERVISED TRAINING SETUP (THE FIX)
-    # ==========================================
-
+    # PHASE 5: SUPERVISED TRAINING SETUP
+    
     logger.info("--- PHASE 5: SUPERVISED TRAINING SETUP ---")
     
     # Group data by user
@@ -213,9 +204,8 @@ def run_pipeline():
     X_supervised.rename(columns=str, inplace=True)
     X_supervised.columns = pd.Index([str(c) for c in X_supervised.columns])
 
-    # ==========================================
     # PHASE 6: SMOTE, EVALUATION & EXPORT
-    # ==========================================
+
     logger.info("--- PHASE 6: RIGOROUS EVALUATION & SMOTE ---")
 
     # 1. Train/Test Split (80% Train, 20% Test)
