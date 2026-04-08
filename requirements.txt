@@ -5,3 +5,9 @@ joblib
 fastapi
 uvicorn
 pydantic
+streamlit
+requests
+imbalanced-learn
+shap
+matplotlib
+seaborn
