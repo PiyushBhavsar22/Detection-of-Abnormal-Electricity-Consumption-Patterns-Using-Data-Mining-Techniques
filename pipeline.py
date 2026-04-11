@@ -4,7 +4,7 @@ import joblib
 from sklearn.ensemble import IsolationForest, RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.metrics import classification_report, accuracy_score
 from imblearn.over_sampling import SMOTE
 import warnings
 import os
@@ -238,7 +238,6 @@ def run_pipeline():
         y_pred = model.predict(X_test)
 
         logger.info(f"Overall Accuracy: {accuracy_score(y_test, y_pred) * 100:.2f}%")
-        logger.info(f"Confusion Matrix:\n{confusion_matrix(y_test, y_pred)}")
         logger.info("-" * 50)
 
     # 6. Final API Deployment Prep: Apply SMOTE to ALL data, then train
