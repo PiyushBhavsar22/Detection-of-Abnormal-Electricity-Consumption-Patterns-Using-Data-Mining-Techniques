@@ -199,56 +199,6 @@ def create_confidence_bar(probabilities):
 # PHASE 2: MODEL PERFORMANCE VISUALIZATION FUNCTIONS
 # ============================================================================
 
-def create_confusion_matrix_heatmap(y_true, y_pred):
-    """Create interactive confusion matrix heatmap"""
-    from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
-    
-    # Calculate confusion matrix
-    cm = confusion_matrix(y_true, y_pred)
-    
-    # Create labels
-    labels = ['Normal User', 'Thief']
-    
-    # Create annotated heatmap
-    fig = go.Figure(data=go.Heatmap(
-        z=cm,
-        x=labels,
-        y=labels,
-        text=cm,
-        texttemplate='%{text}',
-        textfont={"size": 20, "color": "white"},
-        colorscale=[[0, '#1e293b'], [0.5, '#3b82f6'], [1, '#ef4444']],
-        showscale=False,
-        hovertemplate='Predicted: %{x}<br>Actual: %{y}<br>Count: %{z}<extra></extra>'
-    ))
-    
-    # Calculate metrics
-    accuracy = accuracy_score(y_true, y_pred)
-    precision = precision_score(y_true, y_pred, zero_division=0)
-    recall = recall_score(y_true, y_pred, zero_division=0)
-    f1 = f1_score(y_true, y_pred, zero_division=0)
-    
-    # Add annotations for metrics
-    metrics_text = f"Accuracy: {accuracy:.2%} | Precision: {precision:.2%} | Recall: {recall:.2%} | F1: {f1:.2%}"
-    
-    fig.update_layout(
-        title={
-            'text': f'Confusion Matrix<br><sub>{metrics_text}</sub>',
-            'font': {'size': 18, 'color': '#e2e8f0'}
-        },
-        xaxis_title='Predicted Label',
-        yaxis_title='True Label',
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(2, 6, 23, 0.3)',
-        font={'color': "#e2e8f0"},
-        height=400,
-        margin=dict(l=80, r=20, t=80, b=50),
-        xaxis=dict(side='bottom'),
-        yaxis=dict(autorange='reversed')
-    )
-    
-    return fig, {'accuracy': accuracy, 'precision': precision, 'recall': recall, 'f1': f1}
-
 def create_roc_curve(y_true, y_proba):
     """Create ROC curve with AUC score"""
     from sklearn.metrics import roc_curve, auc
@@ -751,7 +701,7 @@ with st.expander("📊 Model Information & Configuration", expanded=False):
         st.markdown("""
         Performance metrics from fair train/test split evaluation:
         - **Accuracy:** ~98.21%
-        - **Precision:** ~81.82% (few false positives)
+        - **Precision:** ~81.82% (high alert quality)
         - **Recall:** ~81.82% (detects most thieves)
         - **F1-Score:** ~81.82% (balanced performance)
         
@@ -771,25 +721,10 @@ with st.expander("📊 Model Information & Configuration", expanded=False):
             y_pred = model.predict(X_test)
             y_proba = model.predict_proba(X_test)[:, 1]  # Probability for positive class
             
-            # Create tabs for different visualizations
-            tab1, tab2, tab3 = st.tabs(["📉 Confusion Matrix", "📈 ROC Curve", "📊 Precision-Recall"])
+            # Create tabs for curve-based evaluation visualizations
+            tab1, tab2 = st.tabs(["📈 ROC Curve", "📊 Precision-Recall"])
             
             with tab1:
-                cm_fig, metrics = create_confusion_matrix_heatmap(y_test, y_pred)
-                st.plotly_chart(cm_fig, use_container_width=True)
-                
-                # Display metrics in columns
-                col_p1, col_p2, col_p3, col_p4 = st.columns(4)
-                with col_p1:
-                    st.metric("Accuracy", f"{metrics['accuracy']:.2%}")
-                with col_p2:
-                    st.metric("Precision", f"{metrics['precision']:.2%}")
-                with col_p3:
-                    st.metric("Recall", f"{metrics['recall']:.2%}")
-                with col_p4:
-                    st.metric("F1-Score", f"{metrics['f1']:.2%}")
-            
-            with tab2:
                 roc_fig, auc_score = create_roc_curve(y_test, y_proba)
                 st.plotly_chart(roc_fig, use_container_width=True)
                 
@@ -800,7 +735,7 @@ with st.expander("📊 Model Information & Configuration", expanded=False):
                 - The curve shows the trade-off between True Positive Rate and False Positive Rate
                 """)
             
-            with tab3:
+            with tab2:
                 pr_fig, ap_score = create_precision_recall_curve(y_test, y_proba)
                 st.plotly_chart(pr_fig, use_container_width=True)
                 
